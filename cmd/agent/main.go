@@ -1,12 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
-	"flag"
 	"fmt"
 	"github.com/hashicorp/yamux"
 	"github.com/nicocha30/ligolo-ng/pkg/agent"
@@ -15,6 +15,7 @@ import (
 	goproxy "golang.org/x/net/proxy"
 	"net"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -24,43 +25,127 @@ var (
 	date    = "unknown"
 )
 
+type Config struct {
+	IgnoreCertificate bool
+	AcceptFingerprint string
+	Verbose           bool
+	Retry             bool
+	SocksProxy        string
+	SocksUser         string
+	SocksPass         string
+	ServerAddr        string
+	BindAddr          string
+}
+
 func main() {
+	config := Config{}
+	showMenu(&config)
+}
+
+func showMenu(config *Config) {
+	reader := bufio.NewReader(os.Stdin)
+
+	for {
+		fmt.Print("ligolo-agent~# ")
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		commands := strings.SplitN(input, " ", 2)
+
+		switch commands[0] {
+		case "connect":
+			if len(commands) < 2 {
+				fmt.Println("Usage: connect <server_address>")
+			} else {
+				config.ServerAddr = commands[1]
+			}
+		case "ignore-cert":
+			if len(commands) < 2 {
+				fmt.Println("Usage: ignore-cert <true/false>")
+			} else {
+				config.IgnoreCertificate = commands[1] == "true"
+			}
+		case "accept-fingerprint":
+			if len(commands) < 2 {
+				fmt.Println("Usage: accept-fingerprint <fingerprint>")
+			} else {
+				config.AcceptFingerprint = commands[1]
+			}
+		case "verbose":
+			if len(commands) < 2 {
+				fmt.Println("Usage: verbose <true/false>")
+			} else {
+				config.Verbose = commands[1] == "true"
+			}
+		case "retry":
+			if len(commands) < 2 {
+				fmt.Println("Usage: retry <true/false>")
+			} else {
+				config.Retry = commands[1] == "true"
+			}
+		case "socks":
+			if len(commands) < 2 {
+				fmt.Println("Usage: socks <proxy_address>")
+			} else {
+				config.SocksProxy = commands[1]
+			}
+		case "socks-user":
+			if len(commands) < 2 {
+				fmt.Println("Usage: socks-user <username>")
+			} else {
+				config.SocksUser = commands[1]
+			}
+		case "socks-pass":
+			if len(commands) < 2 {
+				fmt.Println("Usage: socks-pass <password>")
+			} else {
+				config.SocksPass = commands[1]
+			}
+		case "bind":
+			if len(commands) < 2 {
+				fmt.Println("Usage: bind <bind_address>")
+			} else {
+				config.BindAddr = commands[1]
+			}
+		case "start":
+			startAgent(config)
+		case "menu":
+			printMenu()
+		case "exit":
+			return
+		default:
+			fmt.Println("Unknown command")
+		}
+	}
+}
+
+func printMenu() {
+	fmt.Println("Available commands:")
+	fmt.Println("  connect <server_address>       - Connect to proxy (domain:port)")
+	fmt.Println("  ignore-cert <true/false>       - Ignore TLS certificate validation (dangerous)")
+	fmt.Println("  accept-fingerprint <fingerprint> - Accept certificates matching the specified SHA256 fingerprint (hex format)")
+	fmt.Println("  verbose <true/false>           - Enable verbose mode")
+	fmt.Println("  retry <true/false>             - Auto-retry on error")
+	fmt.Println("  socks <proxy_address>          - SOCKS5 proxy address (ip:port)")
+	fmt.Println("  socks-user <username>          - SOCKS5 username")
+	fmt.Println("  socks-pass <password>          - SOCKS5 password")
+	fmt.Println("  bind <bind_address>            - Bind to IP:port")
+	fmt.Println("  start                          - Start the agent")
+	fmt.Println("  menu                           - Show this menu")
+	fmt.Println("  exit                           - Exit the program")
+}
+
+func startAgent(config *Config) {
 	var tlsConfig tls.Config
-	var ignoreCertificate = flag.Bool("ignore-cert", false, "ignore TLS certificate validation (dangerous), only for debug purposes")
-	var acceptFingerprint = flag.String("accept-fingerprint", "", "accept certificates matching the following SHA256 fingerprint (hex format)")
-	var verbose = flag.Bool("v", false, "enable verbose mode")
-	var retry = flag.Bool("retry", false, "auto-retry on error")
-	var socksProxy = flag.String("socks", "", "socks5 proxy address (ip:port)")
-	var socksUser = flag.String("socks-user", "", "socks5 username")
-	var socksPass = flag.String("socks-pass", "", "socks5 password")
-	var serverAddr = flag.String("connect", "", "connect to proxy (domain:port)")
-	var bindAddr = flag.String("bind", "", "bind to ip:port")
-	var versionFlag = flag.Bool("version", false, "show the current version")
 
-	flag.Usage = func() {
-		fmt.Printf("Ligolo-ng %s / %s / %s\n", version, commit, date)
-		fmt.Println("Made in France with love by @Nicocha30!")
-		fmt.Println("https://github.com/nicocha30/ligolo-ng\n")
-		fmt.Printf("Usage of %s:\n", os.Args[0])
-		flag.PrintDefaults()
-	}
+	logrus.SetReportCaller(config.Verbose)
 
-	flag.Parse()
-
-	if *versionFlag {
-		fmt.Printf("Ligolo-ng %s / %s / %s\n", version, commit, date)
-		return
-	}
-
-	logrus.SetReportCaller(*verbose)
-
-	if *verbose {
+	if config.Verbose {
 		logrus.SetLevel(logrus.DebugLevel)
 	}
 
-	if *bindAddr != "" {
+	if config.BindAddr != "" {
 		selfcrt := selfcert.NewSelfCert(nil)
-		crt, err := selfcrt.GetCertificate(*bindAddr)
+		crt, err := selfcrt.GetCertificate(config.BindAddr)
 		if err != nil {
 			logrus.Fatal(err)
 		}
@@ -68,11 +153,11 @@ func main() {
 		tlsConfig.GetCertificate = func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			return crt, nil
 		}
-		lis, err := net.Listen("tcp", *bindAddr)
+		lis, err := net.Listen("tcp", config.BindAddr)
 		if err != nil {
 			logrus.Fatal(err)
 		}
-		logrus.Infof("Listening on %s...", *bindAddr)
+		logrus.Infof("Listening on %s...", config.BindAddr)
 		for {
 			conn, err := lis.Accept()
 			if err != nil {
@@ -88,15 +173,15 @@ func main() {
 		}
 	}
 
-	if *serverAddr == "" {
+	if config.ServerAddr == "" {
 		logrus.Fatal("please, specify the target host user -connect host:port")
 	}
-	host, _, err := net.SplitHostPort(*serverAddr)
+	host, _, err := net.SplitHostPort(config.ServerAddr)
 	if err != nil {
 		logrus.Fatal("invalid connect address, please use host:port")
 	}
 	tlsConfig.ServerName = host
-	if *ignoreCertificate {
+	if config.IgnoreCertificate {
 		logrus.Warn("warning, certificate validation disabled")
 		tlsConfig.InsecureSkipVerify = true
 	}
@@ -105,20 +190,20 @@ func main() {
 
 	for {
 		var err error
-		if *socksProxy != "" {
-			if _, _, err := net.SplitHostPort(*socksProxy); err != nil {
+		if config.SocksProxy != "" {
+			if _, _, err := net.SplitHostPort(config.SocksProxy); err != nil {
 				logrus.Fatal("invalid socks5 address, please use host:port")
 			}
-			conn, err = sockDial(*serverAddr, *socksProxy, *socksUser, *socksPass)
+			conn, err = sockDial(config.ServerAddr, config.SocksProxy, config.SocksUser, config.SocksPass)
 		} else {
-			conn, err = net.Dial("tcp", *serverAddr)
+			conn, err = net.Dial("tcp", config.ServerAddr)
 		}
 		if err == nil {
-			if *acceptFingerprint != "" {
+			if config.AcceptFingerprint != "" {
 				tlsConfig.InsecureSkipVerify = true
 				tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 					crtFingerprint := sha256.Sum256(rawCerts[0])
-					crtMatch, err := hex.DecodeString(*acceptFingerprint)
+					crtMatch, err := hex.DecodeString(config.AcceptFingerprint)
 					if err != nil {
 						return fmt.Errorf("invalid cert fingerprint: %v\n", err)
 					}
@@ -133,7 +218,7 @@ func main() {
 			err = connect(tlsConn)
 		}
 		logrus.Errorf("Connection error: %v", err)
-		if *retry {
+		if config.Retry {
 			logrus.Info("Retrying in 5 seconds.")
 			time.Sleep(5 * time.Second)
 		} else {
